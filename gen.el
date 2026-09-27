@@ -30,11 +30,11 @@
 (cl-defstruct (gen
                (:constructor gen--make)
                (:copier nil))
-  "A wrapped `generator.el' iterator providing lazy, composable `seq.el' operations."
+  "A wrapped `generator.el' iterator providing lazy `seq.el' operations."
   (iter nil :documentation "The raw generator.el closure iterator.")
-  (peeked nil :documentation "A cons (VALUE . t) when a value has been peeked, else nil.")
-  (exhausted nil :documentation "Non-nil when the iterator has signaled `iter-end-of-sequence'.")
-  (infinite nil :documentation "Non-nil when the generator is known to be infinite."))
+  (peeked nil :documentation "Cons (VALUE . t) when a value was peeked, else nil.")
+  (exhausted nil :documentation "Non-nil when iterator reached `iter-end-of-sequence'.")
+  (infinite nil :documentation "Non-nil when generator is known to be infinite."))
 
 ;;;###autoload
 (defun gen-wrap (iter-or-gen &optional infinite)
@@ -118,7 +118,7 @@ Consumes and exhausts SEQUENCE."
     count))
 
 (cl-defmethod seq-count (predicate (sequence gen))
-  "Count the number of remaining elements in SEQUENCE for which PREDICATE returns non-nil.
+  "Count remaining elements in SEQUENCE for which PREDICATE is non-nil.
 Consumes and exhausts SEQUENCE."
   (gen--check-infinite sequence)
   (let ((count 0)
@@ -129,7 +129,7 @@ Consumes and exhausts SEQUENCE."
     count))
 
 (cl-defmethod seq-reduce (function (sequence gen) initial-value)
-  "Reduce FUNCTION across remaining elements of SEQUENCE starting with INITIAL-VALUE.
+  "Reduce FUNCTION across remaining elements of SEQUENCE with INITIAL-VALUE.
 Consumes and exhausts SEQUENCE as a direct fold."
   (gen--check-infinite sequence)
   (let ((acc initial-value)
@@ -148,7 +148,7 @@ Consumes and exhausts SEQUENCE."
     acc))
 
 (cl-defmethod seq-sort (predicate (sequence gen))
-  "Return a sorted list of remaining elements in SEQUENCE according to PREDICATE.
+  "Return a sorted list of remaining SEQUENCE elements per PREDICATE.
 Consumes and exhausts SEQUENCE."
   (seq-sort predicate (gen--drain sequence)))
 
@@ -212,8 +212,8 @@ Consumes and exhausts SEQUENCE, returning SEQUENCE."
   sequence)
 
 (cl-defmethod seq-map (function (sequence gen))
-  "Return a new lazy `gen' yielding the result of applying FUNCTION to each element.
-Does not consume elements from SEQUENCE until the returned generator is consumed."
+  "Return a new lazy `gen' applying FUNCTION to each element of SEQUENCE.
+Does not consume elements from SEQUENCE until returned generator is consumed."
   (gen-wrap
    (iter-make
     (let (v)
@@ -221,7 +221,7 @@ Does not consume elements from SEQUENCE until the returned generator is consumed
         (iter-yield (funcall function (car v))))))))
 
 (cl-defmethod seq-filter (predicate (sequence gen))
-  "Return a new lazy `gen' yielding only elements for which PREDICATE returns non-nil."
+  "Return a new lazy `gen' yielding elements for which PREDICATE is non-nil."
   (gen-wrap
    (iter-make
     (let (v)
@@ -250,7 +250,7 @@ Does not consume elements from SEQUENCE until the returned generator is consumed
         (iter-yield (car v)))))))
 
 (cl-defmethod seq-take-while (predicate (sequence gen))
-  "Return a new lazy `gen' yielding elements from SEQUENCE as long as PREDICATE returns non-nil."
+  "Return a new lazy `gen' yielding from SEQUENCE while PREDICATE is non-nil."
   (gen-wrap
    (iter-make
     (let (v done)
@@ -260,7 +260,7 @@ Does not consume elements from SEQUENCE until the returned generator is consumed
           (setq done t)))))))
 
 (cl-defmethod seq-drop ((sequence gen) n)
-  "Return a new lazy `gen' yielding elements after skipping the first N elements."
+  "Return a new lazy `gen' yielding elements after skipping first N elements."
   (gen-wrap
    (iter-make
     (let ((count (max 0 n))
@@ -272,7 +272,7 @@ Does not consume elements from SEQUENCE until the returned generator is consumed
           (iter-yield (car v))))))))
 
 (cl-defmethod seq-drop-while (predicate (sequence gen))
-  "Return a new lazy `gen' yielding elements after dropping initial elements satisfying PREDICATE."
+  "Return a new lazy `gen' after dropping initial elements satisfying PREDICATE."
   (gen-wrap
    (iter-make
     (let (v found)
@@ -285,7 +285,7 @@ Does not consume elements from SEQUENCE until the returned generator is consumed
           (iter-yield (car v))))))))
 
 (cl-defmethod seq-some (predicate (sequence gen))
-  "Return the first non-nil result of applying PREDICATE to an element of SEQUENCE.
+  "Return first non-nil result of applying PREDICATE to element of SEQUENCE.
 Short-circuits: stops pulling from SEQUENCE as soon as a match is found."
   (let (res v)
     (while (and (null res) (setq v (gen--next sequence)))
@@ -296,7 +296,7 @@ Short-circuits: stops pulling from SEQUENCE as soon as a match is found."
 
 (cl-defmethod seq-every-p (predicate (sequence gen))
   "Return non-nil if PREDICATE returns non-nil for all elements in SEQUENCE.
-Short-circuits: stops pulling from SEQUENCE as soon as a non-satisfying element is found."
+Short-circuits: stops pulling from SEQUENCE as soon as non-match is found."
   (let ((all-true t)
         v)
     (while (and all-true (setq v (gen--next sequence)))
@@ -305,7 +305,7 @@ Short-circuits: stops pulling from SEQUENCE as soon as a non-satisfying element 
     all-true))
 
 (cl-defmethod seq-find (predicate (sequence gen) &optional default)
-  "Return the first element of SEQUENCE for which PREDICATE returns non-nil, or DEFAULT.
+  "Return first element of SEQUENCE for which PREDICATE is non-nil, or DEFAULT.
 Short-circuits: stops pulling from SEQUENCE as soon as a match is found."
   (let (found v)
     (while (and (not found) (setq v (gen--next sequence)))
