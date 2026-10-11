@@ -72,24 +72,27 @@ on infinite generators.  Draining operations (`seq-length', `seq-reverse',
   "Fetch the next value from G as a cons (VALUE . t), or nil if exhausted.
 Checks the peek buffer first, then the raw generator iterator."
   (unless (gen-exhausted g)
-    (if-let* ((peek (gen-peeked g)))
-        (progn
-          (setf (gen-peeked g) nil)
-          peek)
+    (cond
+     ((gen-peeked g)
+      (let ((peek (gen-peeked g)))
+        (setf (gen-peeked g) nil)
+        peek))
+     (t
       (condition-case nil
           (cons (iter-next (gen-iter g)) t)
         (iter-end-of-sequence
          (setf (gen-exhausted g) t)
-         nil)))))
+         nil))))))
 
 (defun gen--peek (g)
   "Peek at the next value in G without consuming it.
 Returns (VALUE . t), or nil if exhausted."
   (unless (gen-exhausted g)
-    (or (gen-peeked g)
-        (if-let* ((next (gen--next g)))
-            (setf (gen-peeked g) next)
-          nil))))
+    (cond
+     ((gen-peeked g))
+     (t
+      (when-let* ((next (gen--next g)))
+        (setf (gen-peeked g) next))))))
 
 (defun gen--drain (g)
   "Consume all remaining values from G and return them as a list.
@@ -99,6 +102,25 @@ Calling this exhausts G."
     (while (setq v (gen--next g))
       (push (car v) acc))
     (nreverse acc)))
+
+(defun gen--normalize (sequence)
+  "Normalize SEQUENCE into a `gen' instance."
+  (cond
+   ((gen-p sequence) sequence)
+   ((functionp sequence) (gen-wrap sequence))
+   ((listp sequence)
+    (gen-wrap
+     (iter-make
+      (dolist (item sequence)
+        (iter-yield item)))))
+   ((seqp sequence)
+    (let ((len (seq-length sequence)))
+      (gen-wrap
+       (iter-make
+        (dotimes (i len)
+          (iter-yield (seq-elt sequence i)))))))
+   (t
+    (signal 'wrong-type-argument (list 'seqp sequence)))))
 
 ;;; seq.el protocol implementation
 
@@ -160,12 +182,12 @@ Consumes up to N+1 elements from SEQUENCE."
   (let ((i 0)
         v found)
     (while (and (not found) (setq v (gen--next sequence)))
-      (if (= i n)
-          (setq found v)
-        (setq i (1+ i))))
-    (if found
-        (car found)
-      (error "Index out of range: %s" n))))
+      (cond
+       ((= i n) (setq found v))
+       (t (setq i (1+ i)))))
+    (cond
+     (found (car found))
+     (t (error "Index out of range: %s" n)))))
 
 (cl-defmethod seq-subseq ((sequence gen) start &optional end)
   "Return a list of elements of SEQUENCE from index START up to END.
@@ -314,6 +336,172 @@ Short-circuits: stops pulling from SEQUENCE as soon as a match is found."
     (if found
         (car found)
       default)))
+
+;;; Asynchronous stream consumption
+
+;;;###autoload
+(cl-defun gen-run-async (fn sequence &key (concurrency 1) (delay 0.0) on-done on-error)
+  "Consume SEQUENCE asynchronously using FN with bounded CONCURRENCY.
+FN is called with two arguments: (ITEM DONE-CALLBACK).
+When FN finishes processing ITEM, it must invoke DONE-CALLBACK
+with zero or more arguments to signal completion and release its slot.
+
+SEQUENCE is normalized to a `gen' instance if not already one.
+CONCURRENCY limits the number of concurrent asynchronous operations in flight;
+defaults to 1.
+DELAY is the number of seconds to wait before dispatching the next item;
+defaults to 0.0 (yielding cooperatively to the Emacs event loop).
+ON-DONE, if non-nil, is a function called with no arguments once all items
+have been processed and all active operations have finished.
+ON-ERROR, if non-nil, is called with an error descriptor when FN signals
+an error synchronously.  If ON-ERROR is nil, a warning is logged.
+
+Returns a cancellation function of zero arguments.  Invoking this function
+aborts pending scheduled dispatches and prevents further items from being
+consumed."
+  (let* ((g (gen--normalize sequence))
+         (active 0)
+         (exhausted nil)
+         (canceled nil)
+         (finished nil)
+         (timer nil)
+         (concurrency (max 1 (or concurrency 1)))
+         (delay (max 0.0 (or delay 0.0))))
+    (cl-labels
+        ((finish ()
+           (unless (or finished canceled)
+             (setq finished t)
+             (when timer
+               (cancel-timer timer)
+               (setq timer nil))
+             (when on-done
+               (funcall on-done))))
+         (schedule-drain ()
+           (when (and (not timer) (not canceled) (not finished))
+             (setq timer (run-with-timer delay nil #'drain))))
+         (release-slot ()
+           (setq active (1- active))
+           (cond
+            ((and exhausted (= active 0))
+             (finish))
+            ((not exhausted)
+             (schedule-drain))))
+         (drain ()
+           (setq timer nil)
+           (unless (or canceled finished)
+             (cond
+              ((and (< active concurrency) (not exhausted))
+               (let ((v (gen--next g)))
+                 (cond
+                  ((null v)
+                   (setq exhausted t)
+                   (when (= active 0)
+                     (finish)))
+                  (t
+                   (setq active (1+ active))
+                   (when (and (< active concurrency) (not exhausted))
+                     (schedule-drain))
+                   (let ((done-called nil))
+                     (condition-case err
+                         (funcall fn (car v)
+                                  (lambda (&rest _args)
+                                    (unless (or done-called canceled)
+                                      (setq done-called t)
+                                      (release-slot))))
+                       (error
+                        (unless done-called
+                          (setq done-called t)
+                          (release-slot))
+                        (if on-error
+                            (funcall on-error err)
+                          (display-warning
+                           'gen
+                           (format "Error in `gen-run-async' worker: %S" err)
+                           :warning)))))))))
+              ((and exhausted (= active 0))
+               (finish))))))
+      (schedule-drain)
+      (lambda ()
+        (unless (or canceled finished)
+          (setq canceled t)
+          (when timer
+            (cancel-timer timer)
+            (setq timer nil))
+          t)))))
+
+;;;###autoload
+(cl-defun gen-pool-map (fn sequence &key (concurrency 1) (delay 0.0) (order 'preserve) on-done on-error)
+  "Map FN asynchronously over SEQUENCE, accumulating results for ON-DONE.
+FN is called with two arguments: (ITEM DONE-CALLBACK).  FN signals completion
+by calling DONE-CALLBACK with the result value for that item:
+  (funcall DONE RESULT).
+
+CONCURRENCY limits the number of concurrent asynchronous operations in flight;
+defaults to 1.
+DELAY is the number of seconds to wait before dispatching the next item;
+defaults to 0.0 (yielding cooperatively to the Emacs event loop).
+ORDER specifies how results are ordered in ON-DONE:
+  - `preserve' (or t): Preserves input sequence order (the default).
+  - `fifo': Chronological completion order (first finished is first).
+  - `lifo': Reverse chronological completion order (last finished is first).
+  - `unordered' (or nil): Unspecified / cheapest order (zero reordering cost).
+ON-DONE is required and called with a single argument, the list of results.
+ON-ERROR, if non-nil, is called with an error descriptor when FN signals an
+error synchronously.  If ON-ERROR is nil, a warning is logged.
+
+Returns a cancellation function of zero arguments that aborts execution."
+  (unless on-done
+    (error "`gen-pool-map' requires an :on-done callback"))
+  (unless (memq order '(preserve fifo lifo unordered t nil))
+    (error "Invalid :order %S; expected `preserve', `fifo', `lifo', or `unordered'" order))
+  (let* ((preserve-p (memq order '(preserve t)))
+         (results (when preserve-p (make-hash-table :test 'eql)))
+         (total 0)
+         (stream
+          (if preserve-p
+              (let ((g (gen--normalize sequence)))
+                (gen-wrap
+                 (iter-make
+                  (let (v)
+                    (while (setq v (gen--next g))
+                      (let ((idx total))
+                        (setq total (1+ total))
+                        (iter-yield (cons idx (car v)))))))))
+            sequence))
+         (worker
+          (if preserve-p
+              (lambda (pair done)
+                (let ((idx (car pair))
+                      (item (cdr pair)))
+                  (funcall fn item
+                           (lambda (&optional result)
+                             (puthash idx result results)
+                             (funcall done)))))
+            (lambda (item done)
+              (funcall fn item
+                       (lambda (&optional result)
+                         (push result results)
+                         (funcall done))))))
+         (finalize
+          (cond
+           (preserve-p
+            (lambda ()
+              (let (acc)
+                (dotimes (i total)
+                  (push (gethash (- (1- total) i) results) acc))
+                acc)))
+           ((eq order 'fifo)
+            (lambda () (nreverse results)))
+           (t
+            (lambda () results)))))
+    (gen-run-async
+     worker
+     stream
+     :concurrency concurrency
+     :delay delay
+     :on-error on-error
+     :on-done (lambda ()
+                (funcall on-done (funcall finalize))))))
 
 (provide 'gen)
 ;;; gen.el ends here

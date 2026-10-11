@@ -24,6 +24,7 @@ eager draining operations (=seq-reduce=, =seq-into=, =seq-length=).
 - Fully lazy pipelining: transformations only pull elements as demanded.
 - Short-circuiting for search operations (=seq-find=, =seq-some=, =seq-every-p=).
 - Infinite generator support with safeguard warnings on unbounded drain operations.
+- Asynchronous and yielding stream consumption with bounded concurrency and cooperative timer yields.
 
 * Installation
 :PROPERTIES:
@@ -100,15 +101,56 @@ git clone https://github.com/tychoish/gen.el.git ~/src/gen.el
 ;; => (4 16 36 64 100)
 #+end_src
 
+** Asynchronous Processing
+#+begin_src emacs-lisp
+;; Consume a sequence asynchronously with bounded concurrency
+(gen-run-async
+ (lambda (item done)
+   (message "Processing %s" item)
+   (funcall done))
+ '(1 2 3 4 5)
+ :concurrency 2
+ :on-done (lambda () (message "All items processed!")))
+
+;; Asynchronously map over a sequence, preserving input sequence order (default)
+(gen-pool-map
+ (lambda (item done)
+   (run-with-timer 0.01 nil (lambda () (funcall done (* item 10)))))
+ '(1 2 3 4 5)
+ :concurrency 3
+ :order 'preserve
+ :on-done (lambda (results) (message "Preserved results: %S" results)))
+
+;; Collect in chronological completion order (FIFO)
+(gen-pool-map
+ (lambda (item done)
+   (run-with-timer 0.01 nil (lambda () (funcall done (* item 10)))))
+ '(1 2 3 4 5)
+ :concurrency 3
+ :order 'fifo
+ :on-done (lambda (results) (message "Chronological results: %S" results)))
+
+;; Collect without reordering overhead (unordered / cheapest)
+(gen-pool-map
+ (lambda (item done)
+   (run-with-timer 0.01 nil (lambda () (funcall done (* item 10)))))
+ '(1 2 3 4 5)
+ :concurrency 3
+ :order 'unordered
+ :on-done (lambda (results) (message "Unordered results: %S" results)))
+#+end_src
+
 * Commands & API
 :PROPERTIES:
 :CUSTOM_ID: commands
 :END:
 
-| Function           | Summary                                                      |
-|--------------------+--------------------------------------------------------------|
-| =gen-wrap=         | Wrap an iterator closure in a =gen= struct for =seq.el=.     |
-| =gen-p=            | Return non-nil if object is a wrapped =gen= generator.       |
+| Function           | Summary                                                           |
+|--------------------+-------------------------------------------------------------------|
+| =gen-wrap=         | Wrap an iterator closure in a =gen= struct for =seq.el=.          |
+| =gen-p=            | Return non-nil if object is a wrapped =gen= generator.            |
+| =gen-run-async=    | Consume a sequence asynchronously with bounded concurrency.       |
+| =gen-pool-map=     | Asynchronously map over a sequence, collecting results.           |
 
 * Development
 :PROPERTIES:
