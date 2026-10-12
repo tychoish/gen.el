@@ -294,7 +294,7 @@ Does not consume elements from SEQUENCE until returned generator is consumed."
           (iter-yield (car v))))))))
 
 (cl-defmethod seq-drop-while (predicate (sequence gen))
-  "Return a new lazy `gen' after dropping initial elements satisfying PREDICATE."
+  "Return a new lazy `gen' after dropping elements satisfying PREDICATE."
   (gen-wrap
    (iter-make
     (let (v found)
@@ -342,27 +342,37 @@ Short-circuits: stops pulling from SEQUENCE as soon as a match is found."
 ;;;###autoload
 (cl-defun gen-run-async (fn sequence &key (concurrency 1) (delay 0.0) on-done on-error)
   "Consume SEQUENCE asynchronously using FN with bounded CONCURRENCY.
-FN is called with two arguments: (ITEM DONE-CALLBACK).
-When FN finishes processing ITEM, it must invoke DONE-CALLBACK
-with zero or more arguments to signal completion and release its slot.
+
+FN is called with two arguments: (ITEM DONE-CALLBACK).  When FN finishes
+processing ITEM, it must invoke DONE-CALLBACK with zero or more
+arguments to signal completion and release its slot.
 
 SEQUENCE is normalized to a `gen' instance if not already one.
-CONCURRENCY limits the number of concurrent asynchronous operations in flight;
-defaults to 1.
+
+CONCURRENCY limits the number of concurrent asynchronous operations in
+flight; defaults to 1.
+
 DELAY is the number of seconds to wait before dispatching the next item;
 defaults to 0.0 (yielding cooperatively to the Emacs event loop).
-ON-DONE, if non-nil, is a function called with no arguments once all items
-have been processed and all active operations have finished.
+
+ON-DONE, if non-nil, is a function called with no arguments once all
+items have been processed and all active operations have finished.
+
 ON-ERROR, if non-nil, is called with an error descriptor when FN signals
 an error synchronously.  If ON-ERROR is nil, a warning is logged.
 
 Returns a runner handle function `(lambda (&optional action) ...)`.
-Calling it with no arguments or `:cancel` aborts pending scheduled dispatches
-and prevents further items from being consumed.
-Passing `:pause` halts dequeueing new items while letting in-flight workers finish.
+
+Calling it with no arguments or `:cancel` aborts pending scheduled
+dispatches and prevents further items from being consumed.
+
+Passing `:pause` halts dequeueing new items while letting in-flight
+workers finish.
+
 Passing `:resume` resumes dequeueing.
-Passing `:paused-p`, `:canceled-p`, `:finished-p`, or `:active-count` queries
-runner state."
+
+Passing `:paused-p`, `:canceled-p`, `:finished-p`, or `:active-count`
+queries runner state."
   (let* ((g (gen--normalize sequence))
          (active 0)
          (exhausted nil)
