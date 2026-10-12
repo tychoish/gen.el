@@ -504,5 +504,54 @@ If LIMIT-OR-INFINITE is `infinite', yields forever."
         (sit-for 0.005)))
     (should (equal '(2 1) processed))))
 
+
+(ert-deftest gen/run-async-pause-resume ()
+  "Verify gen-run-async handle supports :pause and :resume."
+  (let* ((items (list 1 2 3 4 5))
+         (processed nil)
+         (done nil)
+         (handle nil))
+    (setq handle
+          (gen-run-async
+           (lambda (item done-cb)
+             (push item processed)
+             (run-with-timer 0.01 nil done-cb))
+           items
+           :concurrency 1
+           :on-done (lambda () (setq done t))))
+    (gen-test-wait-until (equal processed (list 1)))
+    (should (funcall handle :pause))
+    (should (funcall handle :paused-p))
+    ;; Wait a bit and verify no further items were processed while paused
+    (sit-for 0.05)
+    (should (equal processed (list 1)))
+    ;; Resume and verify processing finishes
+    (should (funcall handle :resume))
+    (should-not (funcall handle :paused-p))
+    (gen-test-wait-until done)
+    (should (funcall handle :finished-p))
+    (should (equal (sort processed #'<) (list 1 2 3 4 5)))))
+
+(ert-deftest gen/run-async-handle-queries ()
+  "Verify handle query actions (:paused-p, :canceled-p, :finished-p, :active-count)."
+  (let* ((hold-cb nil)
+         (done nil)
+         (handle
+          (gen-run-async
+           (lambda (_item done-cb)
+             (setq hold-cb done-cb))
+           (list 10)
+           :concurrency 1
+           :on-done (lambda () (setq done t)))))
+    (gen-test-wait-until hold-cb)
+    (should (= (funcall handle :active-count) 1))
+    (should-not (funcall handle :canceled-p))
+    (should-not (funcall handle :paused-p))
+    (should-not (funcall handle :finished-p))
+    (funcall hold-cb)
+    (gen-test-wait-until done)
+    (should (= (funcall handle :active-count) 0))
+    (should (funcall handle :finished-p))))
+
 (provide 'test-gen)
 ;;; test-gen.el ends here

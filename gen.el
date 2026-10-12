@@ -356,13 +356,18 @@ have been processed and all active operations have finished.
 ON-ERROR, if non-nil, is called with an error descriptor when FN signals
 an error synchronously.  If ON-ERROR is nil, a warning is logged.
 
-Returns a cancellation function of zero arguments.  Invoking this function
-aborts pending scheduled dispatches and prevents further items from being
-consumed."
+Returns a runner handle function `(lambda (&optional action) ...)`.
+Calling it with no arguments or `:cancel` aborts pending scheduled dispatches
+and prevents further items from being consumed.
+Passing `:pause` halts dequeueing new items while letting in-flight workers finish.
+Passing `:resume` resumes dequeueing.
+Passing `:paused-p`, `:canceled-p`, `:finished-p`, or `:active-count` queries
+runner state."
   (let* ((g (gen--normalize sequence))
          (active 0)
          (exhausted nil)
          (canceled nil)
+         (paused nil)
          (finished nil)
          (timer nil)
          (concurrency (max 1 (or concurrency 1)))
@@ -377,18 +382,18 @@ consumed."
              (when on-done
                (funcall on-done))))
          (schedule-drain ()
-           (when (and (not timer) (not canceled) (not finished))
+           (when (and (not timer) (not canceled) (not paused) (not finished))
              (setq timer (run-with-timer delay nil #'drain))))
          (release-slot ()
            (setq active (1- active))
            (cond
             ((and exhausted (= active 0))
              (finish))
-            ((not exhausted)
+            ((and (not exhausted) (not paused))
              (schedule-drain))))
          (drain ()
            (setq timer nil)
-           (unless (or canceled finished)
+           (unless (or canceled paused finished)
              (cond
               ((and (< active concurrency) (not exhausted))
                (let ((v (gen--next g)))
@@ -399,7 +404,7 @@ consumed."
                      (finish)))
                   (t
                    (setq active (1+ active))
-                   (when (and (< active concurrency) (not exhausted))
+                   (when (and (< active concurrency) (not exhausted) (not paused))
                      (schedule-drain))
                    (let ((done-called nil))
                      (condition-case err
@@ -421,13 +426,32 @@ consumed."
               ((and exhausted (= active 0))
                (finish))))))
       (schedule-drain)
-      (lambda ()
-        (unless (or canceled finished)
-          (setq canceled t)
-          (when timer
-            (cancel-timer timer)
-            (setq timer nil))
-          t)))))
+      (lambda (&optional action)
+        (pcase (or action :cancel)
+          (:cancel
+           (unless (or canceled finished)
+             (setq canceled t)
+             (when timer
+               (cancel-timer timer)
+               (setq timer nil))
+             t))
+          (:pause
+           (unless (or canceled paused finished)
+             (setq paused t)
+             (when timer
+               (cancel-timer timer)
+               (setq timer nil))
+             t))
+          (:resume
+           (when (and paused (not canceled) (not finished))
+             (setq paused nil)
+             (schedule-drain)
+             t))
+          (:paused-p paused)
+          (:canceled-p canceled)
+          (:finished-p finished)
+          (:active-count active)
+          (_ (error "Unknown handle action: %S" action)))))))
 
 ;;;###autoload
 (cl-defun gen-pool-map (fn sequence &key (concurrency 1) (delay 0.0) (order 'preserve) on-done on-error)
