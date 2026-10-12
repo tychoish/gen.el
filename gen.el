@@ -425,7 +425,10 @@ runner state."
                            :warning)))))))))
               ((and exhausted (= active 0))
                (finish))))))
-      (schedule-drain)
+      (if (zerop delay)
+          (while (and (< active concurrency) (not exhausted) (not canceled) (not paused) (not finished))
+            (drain))
+        (schedule-drain))
       (lambda (&optional action)
         (pcase (or action :cancel)
           (:cancel
