@@ -9,7 +9,7 @@
 ;;; Helpers
 
 (defmacro gen-test--with-counting-generator (counter-var limit-or-infinite &rest body)
-  "Create a counting generator bound to `g', incrementing COUNTER-VAR on each yield.
+  "Create a counting generator bound to `g', incrementing COUNTER-VAR.
 If LIMIT-OR-INFINITE is an integer, yields integers 1..LIMIT-OR-INFINITE.
 If LIMIT-OR-INFINITE is `infinite', yields forever."
   (declare (indent 2))
@@ -552,6 +552,94 @@ If LIMIT-OR-INFINITE is `infinite', yields forever."
     (gen-test-wait-until done)
     (should (= (funcall handle :active-count) 0))
     (should (funcall handle :finished-p))))
+
+(ert-deftest gen/run-async-unary-worker ()
+  "Verify unary worker function auto-releases without explicit done-cb."
+  (let ((items '(1 2 3))
+        (processed nil)
+        (done nil))
+    (gen-run-async
+     (lambda (item)
+       (push item processed))
+     items
+     :on-done (lambda () (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal (reverse processed) '(1 2 3)))))
+
+(ert-deftest gen/run-async-idle-scheduling ()
+  "Verify :idle schedules via idle timers."
+  (let ((idle-timers nil))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (secs _repeat fn &rest _args)
+                 (let ((rec (list secs fn)))
+                   (push rec idle-timers)
+                   rec)))
+              ((symbol-function 'cancel-timer) #'ignore))
+      (let ((handle (gen-run-async
+                     (lambda (x) x)
+                     '(1 2 3)
+                     :idle t
+                     :delay 0.5)))
+        (should (consp idle-timers))
+        (funcall handle :cancel)))))
+
+(ert-deftest gen/run-async-initial-delay ()
+  "Verify :run-after or :initial-delay sets first timer delay."
+  (let ((timers nil))
+    (cl-letf (((symbol-function 'run-with-timer)
+               (lambda (secs _repeat fn &rest _args)
+                 (let ((rec (list secs fn)))
+                   (push rec timers)
+                   rec)))
+              ((symbol-function 'cancel-timer) #'ignore))
+      (let ((handle (gen-run-async
+                     (lambda (x) x)
+                     '(1)
+                     :run-after 3.5)))
+        (should (= (caar timers) 3.5))
+        (funcall handle :cancel)))))
+
+(ert-deftest gen/run-async-handle-metadata ()
+  "Verify handle queries for :name, :total, :processed, and :status."
+  (let* ((items '(10 20 30))
+         (done nil)
+         (handle (gen-run-async
+                  (lambda (x) x)
+                  items
+                  :name "sample-task"
+                  :on-done (lambda () (setq done t)))))
+    (should (string= (funcall handle :name) "sample-task"))
+    (should (= (funcall handle :total) 3))
+    (gen-test-wait-until done)
+    (should (= (funcall handle :processed) 3))
+    (should (eq (funcall handle :status) 'finished))))
+
+(ert-deftest gen/run-async-active-runners-registry ()
+  "Verify gen-active-runners tracks in-flight runners and gen-cancel-all-async."
+  (let* ((hold-cb nil)
+         (handle (gen-run-async
+                  (lambda (_item done-cb) (setq hold-cb done-cb))
+                  '(1)
+                  :name "held-task")))
+    (gen-test-wait-until hold-cb)
+    (should (memq handle (gen-active-runners)))
+    (gen-cancel-all-async)
+    (should-not (memq handle (gen-active-runners)))
+    (should (funcall handle :canceled-p))))
+
+(ert-deftest gen/run-async-context-buffer ()
+  "Verify :buffer executes worker inside requested buffer context."
+  (let ((executed-in nil)
+        (done nil))
+    (gen-run-async
+     (lambda (_) (push (buffer-name) executed-in))
+     '(1 2)
+     :buffer 'temp
+     :on-done (lambda () (setq done t)))
+    (gen-test-wait-until done)
+    (should (= (length executed-in) 2))
+    (should (seq-every-p (lambda (name) (string-prefix-p " *temp*" name))
+                         executed-in))))
 
 (provide 'test-gen)
 ;;; test-gen.el ends here
