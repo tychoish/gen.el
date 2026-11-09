@@ -145,12 +145,15 @@ git clone https://github.com/tychoish/gen.el.git ~/src/gen.el
 :CUSTOM_ID: commands
 :END:
 
-| Function           | Summary                                                           |
-|--------------------+-------------------------------------------------------------------|
-| =gen-wrap=         | Wrap an iterator closure in a =gen= struct for =seq.el=.          |
-| =gen-p=            | Return non-nil if object is a wrapped =gen= generator.            |
-| =gen-run-async=    | Consume a sequence asynchronously with bounded concurrency.       |
-| =gen-pool-map=     | Asynchronously map over a sequence, collecting results.           |
+| Function                  | Summary                                                           |
+|---------------------------+-------------------------------------------------------------------|
+| =gen-wrap=                | Wrap an iterator closure in a =gen= struct for =seq.el=.          |
+| =gen-p=                   | Return non-nil if object is a wrapped =gen= generator.            |
+| =gen-run-async=           | Consume a sequence asynchronously with bounded concurrency.       |
+| =gen-pool-map=            | Asynchronously map over a sequence, collecting results.           |
+| =gen-reactor-dispatch=    | Generic: dispatch an item to a custom reactor without blocking.   |
+| =gen-reactor-cancel=      | Generic: cancel in-flight work on a custom reactor.               |
+| =gen-reactor-concurrency= | Generic: return max concurrent items a custom reactor can run.    |
 
 * Development
 :PROPERTIES:

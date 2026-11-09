@@ -379,11 +379,38 @@ If FRAME is non-nil and live, BODY executes with FRAME selected."
                   (with-current-buffer (get-buffer-create ,buf-sym) ,@body))
                  (t ,@body)))))))
 
+;;; Reactor protocol
+
+(cl-defgeneric gen-reactor-dispatch (reactor item done-cb err-cb)
+  "Dispatch ITEM to REACTOR without blocking.
+Call (funcall DONE-CB RESULT) on success, or (funcall ERR-CB ERROR) on
+failure.  Exactly one of the two callbacks must be called.")
+
+(cl-defgeneric gen-reactor-cancel (reactor &optional reason)
+  "Cancel any in-flight work on REACTOR, optionally recording REASON.")
+
+(cl-defgeneric gen-reactor-concurrency (reactor)
+  "Return the maximum number of concurrent items REACTOR can run.")
+
+(defun gen--reactor-worker (reactor on-error)
+  "Return a two-argument worker function that dispatches through REACTOR.
+Failures are passed to ON-ERROR when non-nil, otherwise logged as a
+warning.  The result of a failed item is nil."
+  (lambda (item done)
+    (gen-reactor-dispatch
+     reactor item
+     (lambda (result) (funcall done result))
+     (lambda (err)
+       (if on-error
+           (funcall on-error err)
+         (display-warning 'gen (format "Reactor error: %S" err) :warning))
+       (funcall done nil)))))
+
 ;;;###autoload
-(cl-defun gen-run-async (fn sequence &key (concurrency 1) (delay 0.0)
+(cl-defun gen-run-async (fn sequence &key (concurrency 1 concurrency-p) (delay 0.0)
                                     run-after initial-delay
                                     idle (name nil) label
-                                    buffer frame
+                                    buffer frame reactor on-cancel
                                     on-done on-error)
   "Consume SEQUENCE asynchronously using FN with bounded CONCURRENCY.
 
@@ -416,6 +443,13 @@ Supported keyword arguments:
     Callback invoked with no arguments once all items finish.
   :on-error FUNCTION
     Callback invoked with error descriptor if FN signals synchronously.
+  :reactor REACTOR
+    Object implementing `gen-reactor-dispatch'.  When non-nil, FN is
+    ignored (pass nil) and each item is dispatched through REACTOR.
+    :concurrency defaults to `gen-reactor-concurrency'.  Canceling the
+    runner calls `gen-reactor-cancel'.
+  :on-cancel FUNCTION
+    Called with no arguments when the runner is canceled.
 
 Returns a runner handle function `(lambda (&optional action) ...)`.
 Calling it with no arguments or `:cancel' aborts pending dispatches.
@@ -423,7 +457,17 @@ Passing `:pause' halts dequeueing new items while in-flight workers finish.
 Passing `:resume' resumes dequeueing.
 Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
 `:processed', `:total', `:name', or `:status' queries runner state."
-  (let* ((runner-name (or name label))
+  (let* ((fn (if reactor (gen--reactor-worker reactor on-error) fn))
+         (on-cancel (if reactor
+                        (let ((orig on-cancel))
+                          (lambda ()
+                            (gen-reactor-cancel reactor)
+                            (when orig (funcall orig))))
+                      on-cancel))
+         (concurrency (if (and reactor (not concurrency-p))
+                          (gen-reactor-concurrency reactor)
+                        concurrency))
+         (runner-name (or name label))
          (total (cond ((null sequence) 0)
                       ((sequencep sequence) (length sequence))
                       (t nil)))
@@ -516,6 +560,7 @@ Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
                      (cancel-timer timer)
                      (setq timer nil))
                    (setq gen--active-runners (delq runner-fn gen--active-runners))
+                   (when on-cancel (funcall on-cancel))
                    t))
                 (:pause
                  (unless (or canceled paused finished)
@@ -551,8 +596,8 @@ Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
       runner-fn)))
 
 ;;;###autoload
-(cl-defun gen-pool-map (fn sequence &key (concurrency 1) (delay 0.0)
-                                         run-after initial-delay idle
+(cl-defun gen-pool-map (fn sequence &key (concurrency 1 concurrency-p) (delay 0.0)
+                                         run-after initial-delay idle reactor
                                          (order 'preserve) on-done on-error)
   "Map FN asynchronously over SEQUENCE, accumulating results for ON-DONE.
 FN is called with two arguments: (ITEM DONE-CALLBACK).  FN signals completion
@@ -571,13 +616,19 @@ ORDER specifies how results are ordered in ON-DONE:
 ON-DONE is required and called with a single argument, the list of results.
 ON-ERROR, if non-nil, is called with an error descriptor when FN signals an
 error synchronously.  If ON-ERROR is nil, a warning is logged.
+REACTOR, if non-nil, replaces FN (pass nil): items are dispatched through
+`gen-reactor-dispatch' and CONCURRENCY defaults to the reactor's capacity.
 
 Returns a cancellation function of zero arguments that aborts execution."
   (unless on-done
     (error "`gen-pool-map' requires an :on-done callback"))
   (unless (memq order '(preserve fifo lifo unordered t nil))
     (error "Invalid :order %S; expected `preserve', `fifo', `lifo', or `unordered'" order))
-  (let* ((preserve-p (memq order '(preserve t)))
+  (let* ((fn (if reactor (gen--reactor-worker reactor on-error) fn))
+         (concurrency (if (and reactor (not concurrency-p))
+                          (gen-reactor-concurrency reactor)
+                        concurrency))
+         (preserve-p (memq order '(preserve t)))
          (results (when preserve-p (make-hash-table :test 'eql)))
          (total 0)
          (stream
@@ -625,6 +676,7 @@ Returns a cancellation function of zero arguments that aborts execution."
      :run-after run-after
      :initial-delay initial-delay
      :idle idle
+     :on-cancel (when reactor (lambda () (gen-reactor-cancel reactor)))
      :on-error on-error
      :on-done (lambda ()
                 (funcall on-done (funcall finalize))))))

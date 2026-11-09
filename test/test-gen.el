@@ -641,5 +641,82 @@ If LIMIT-OR-INFINITE is `infinite', yields forever."
     (should (seq-every-p (lambda (name) (string-prefix-p " *temp*" name))
                          executed-in))))
 
+;;; Reactor protocol tests
+
+(cl-defstruct (gen-test--mock-reactor (:constructor gen-test--make-reactor))
+  (capacity 2)
+  (fn #'identity)
+  (dispatched nil)
+  (canceled nil))
+
+(cl-defmethod gen-reactor-concurrency ((r gen-test--mock-reactor))
+  (gen-test--mock-reactor-capacity r))
+
+(cl-defmethod gen-reactor-dispatch ((r gen-test--mock-reactor) item done-cb err-cb)
+  (push item (gen-test--mock-reactor-dispatched r))
+  (run-with-timer
+   0.005 nil
+   (lambda ()
+     (condition-case err
+         (funcall done-cb (funcall (gen-test--mock-reactor-fn r) item))
+       (error (funcall err-cb err))))))
+
+(cl-defmethod gen-reactor-cancel ((r gen-test--mock-reactor) &optional reason)
+  (setf (gen-test--mock-reactor-canceled r) (or reason t)))
+
+(ert-deftest gen/reactor-pool-map-dispatch-and-order ()
+  "Verify gen-pool-map dispatches through :reactor and preserves order."
+  (let* ((reactor (gen-test--make-reactor :capacity 2 :fn (lambda (x) (* x 10))))
+         (results nil)
+         (done nil))
+    (gen-pool-map
+     nil
+     '(1 2 3 4)
+     :reactor reactor
+     :order 'preserve
+     :on-done (lambda (res)
+                (setq results res)
+                (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal results '(10 20 30 40)))
+    (should (equal (sort (gen-test--mock-reactor-dispatched reactor) #'<) '(1 2 3 4)))))
+
+(ert-deftest gen/reactor-error-callback-handling ()
+  "Verify reactor err-cb invokes :on-error and records nil for the failed item."
+  (let* ((reactor (gen-test--make-reactor
+                   :capacity 2
+                   :fn (lambda (x)
+                         (if (= x 2)
+                             (error "Boom on 2")
+                           (* x 10)))))
+         (errors nil)
+         (results nil)
+         (done nil))
+    (gen-pool-map
+     nil
+     '(1 2 3)
+     :reactor reactor
+     :order 'preserve
+     :on-error (lambda (err) (push err errors))
+     :on-done (lambda (res)
+                (setq results res)
+                (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal results '(10 nil 30)))
+    (should (= (length errors) 1))))
+
+(ert-deftest gen/reactor-cancel-propagates ()
+  "Verify canceling runner handle calls gen-reactor-cancel."
+  (let* ((reactor (gen-test--make-reactor
+                   :capacity 1
+                   :fn (lambda (x) x)))
+         (handle (gen-run-async
+                  nil
+                  '(1 2 3 4 5)
+                  :reactor reactor
+                  :delay 0.05)))
+    (funcall handle :cancel)
+    (should (gen-test--mock-reactor-canceled reactor))))
+
 (provide 'test-gen)
 ;;; test-gen.el ends here
