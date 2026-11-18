@@ -523,46 +523,48 @@ Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
          (drain ()
            (setq timer nil)
            (unless (or canceled paused finished)
-             (let ((in-drain-loop t)
-                   (dispatched 0))
-               (while (and (< dispatched chunk-limit)
-                           (< active concurrency)
-                           (not exhausted)
-                           (not canceled)
-                           (not paused)
-                           (not finished))
-                 (let ((v (gen--next g)))
-                   (cond
-                    ((null v)
-                     (setq exhausted t)
-                     (when (= active 0)
-                       (finish)))
-                    (t
-                     (cl-incf dispatched)
-                     (setq active (1+ active))
-                     (let ((done-called nil))
-                       (condition-case err
-                           (gen--with-context frame buffer
-                             (if unary-p
-                                 (prog1 (funcall fn (car v))
-                                   (unless (or done-called canceled)
-                                     (setq done-called t)
-                                     (release-slot)))
-                               (funcall fn (car v)
-                                        (lambda (&rest _args)
-                                          (unless (or done-called canceled)
-                                            (setq done-called t)
-                                            (release-slot))))))
-                         (error
-                          (unless done-called
-                            (setq done-called t)
-                            (release-slot))
-                          (if on-error
-                              (funcall on-error err)
-                            (display-warning
-                             'gen
-                             (format "Error in `gen-run-async' worker: %S" err)
-                             :warning)))))))))
+             (let ((dispatched 0))
+               (setq in-drain-loop t)
+               (unwind-protect
+                 (while (and (< dispatched chunk-limit)
+                             (< active concurrency)
+                             (not exhausted)
+                             (not canceled)
+                             (not paused)
+                             (not finished))
+                   (let ((v (gen--next g)))
+                     (cond
+                      ((null v)
+                       (setq exhausted t)
+                       (when (= active 0)
+                         (finish)))
+                      (t
+                       (cl-incf dispatched)
+                       (setq active (1+ active))
+                       (let ((done-called nil))
+                         (condition-case err
+                             (gen--with-context frame buffer
+                               (if unary-p
+                                   (prog1 (funcall fn (car v))
+                                     (unless (or done-called canceled)
+                                       (setq done-called t)
+                                       (release-slot)))
+                                 (funcall fn (car v)
+                                          (lambda (&rest _args)
+                                            (unless (or done-called canceled)
+                                              (setq done-called t)
+                                              (release-slot))))))
+                           (error
+                            (unless done-called
+                              (setq done-called t)
+                              (release-slot))
+                            (if on-error
+                                (funcall on-error err)
+                              (display-warning
+                               'gen
+                               (format "Error in `gen-run-async' worker: %S" err)
+                               :warning)))))))))
+                 (setq in-drain-loop nil))
                (when (and (not exhausted) (not canceled) (not paused) (not finished)
                           (= active 0))
                  (schedule-drain))))))
