@@ -424,7 +424,7 @@ SEQUENCE is normalized to a `gen' instance if not already one.
 
 Supported keyword arguments:
   :chunk-size NUMBER
-    Maximum number of unary operations to execute per dispatch tick (defaults to 1).
+    Maximum unary operations to execute per dispatch tick (defaults to 1).
   :concurrency LIMIT
     Limits concurrent asynchronous operations in flight (defaults to 1).
   :delay SECONDS
@@ -702,7 +702,7 @@ Returns a cancellation function of zero arguments that aborts execution."
                                       run-after initial-delay idle (name nil) label
                                       buffer frame reactor on-progress on-cancel
                                       on-done on-error)
-  "Apply FN asynchronously for side effects across SEQUENCE, calling ON-DONE when complete.
+  "Apply FN asynchronously across SEQUENCE for side effects, then call ON-DONE.
 Unlike `gen-pool-map', results are not accumulated in memory.
 
 FN is called with either (ITEM DONE-CALLBACK) or (ITEM).  When FN is unary,
@@ -711,7 +711,7 @@ CHUNK-SIZE items are processed per dispatch tick before yielding to the timer.
 
 Supported keyword arguments:
   :chunk-size NUMBER
-    Maximum number of unary operations to execute per dispatch tick (defaults to 1).
+    Maximum unary operations to execute per dispatch tick (defaults to 1).
   :concurrency LIMIT
     Limits concurrent asynchronous operations in flight (defaults to 1).
   :delay SECONDS
