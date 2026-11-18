@@ -407,10 +407,10 @@ warning.  The result of a failed item is nil."
        (funcall done nil)))))
 
 ;;;###autoload
-(cl-defun gen-run-async (fn sequence &key (concurrency 1 concurrency-p) (delay 0.0)
+(cl-defun gen-run-async (fn sequence &key (chunk-size 1) (concurrency 1 concurrency-p) (delay 0.0)
                                     run-after initial-delay
                                     idle (name nil) label
-                                    buffer frame reactor on-cancel
+                                    buffer frame reactor on-progress on-cancel
                                     on-done on-error)
   "Consume SEQUENCE asynchronously using FN with bounded CONCURRENCY.
 
@@ -423,6 +423,8 @@ signal completion and release its slot.
 SEQUENCE is normalized to a `gen' instance if not already one.
 
 Supported keyword arguments:
+  :chunk-size NUMBER
+    Maximum number of unary operations to execute per dispatch tick (defaults to 1).
   :concurrency LIMIT
     Limits concurrent asynchronous operations in flight (defaults to 1).
   :delay SECONDS
@@ -439,6 +441,8 @@ Supported keyword arguments:
     a buffer object or string executes in `with-current-buffer'.
   :frame FRAME
     Optional frame context for `with-selected-frame'.
+  :on-progress FUNCTION
+    Callback invoked with (PROCESSED TOTAL) when an item completes.
   :on-done FUNCTION
     Callback invoked with no arguments once all items finish.
   :on-error FUNCTION
@@ -480,6 +484,8 @@ Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
          (finished nil)
          (timer nil)
          (concurrency (max 1 (or concurrency 1)))
+         (chunk-limit (max 1 (or chunk-size 1)))
+         (in-drain-loop nil)
          (delay (max 0.0 (or delay 0.0)))
          (wait-start (max 0.0 (or run-after initial-delay delay)))
          (use-idle (or idle nil))
@@ -505,51 +511,61 @@ Passing `:paused-p', `:canceled-p', `:finished-p', `:active-count',
          (release-slot ()
            (setq active (1- active))
            (cl-incf processed)
+           (when on-progress
+             (condition-case nil
+                 (funcall on-progress processed total)
+               (error nil)))
            (cond
             ((and exhausted (= active 0))
              (finish))
-            ((and (not exhausted) (not paused))
+            ((and (not exhausted) (not paused) (not in-drain-loop))
              (schedule-drain))))
          (drain ()
            (setq timer nil)
            (unless (or canceled paused finished)
-             (cond
-              ((and (< active concurrency) (not exhausted))
-               (let ((v (gen--next g)))
-                 (cond
-                  ((null v)
-                   (setq exhausted t)
-                   (when (= active 0)
-                     (finish)))
-                  (t
-                   (setq active (1+ active))
-                   (when (and (< active concurrency) (not exhausted) (not paused))
-                     (schedule-drain))
-                   (let ((done-called nil))
-                     (condition-case err
-                         (gen--with-context frame buffer
-                           (if unary-p
-                               (prog1 (funcall fn (car v))
-                                 (unless (or done-called canceled)
-                                   (setq done-called t)
-                                   (release-slot)))
-                             (funcall fn (car v)
-                                      (lambda (&rest _args)
-                                        (unless (or done-called canceled)
-                                          (setq done-called t)
-                                          (release-slot))))))
-                       (error
-                        (unless done-called
-                          (setq done-called t)
-                          (release-slot))
-                        (if on-error
-                            (funcall on-error err)
-                          (display-warning
-                           'gen
-                           (format "Error in `gen-run-async' worker: %S" err)
-                           :warning)))))))))
-              ((and exhausted (= active 0))
-               (finish))))))
+             (let ((in-drain-loop t)
+                   (dispatched 0))
+               (while (and (< dispatched chunk-limit)
+                           (< active concurrency)
+                           (not exhausted)
+                           (not canceled)
+                           (not paused)
+                           (not finished))
+                 (let ((v (gen--next g)))
+                   (cond
+                    ((null v)
+                     (setq exhausted t)
+                     (when (= active 0)
+                       (finish)))
+                    (t
+                     (cl-incf dispatched)
+                     (setq active (1+ active))
+                     (let ((done-called nil))
+                       (condition-case err
+                           (gen--with-context frame buffer
+                             (if unary-p
+                                 (prog1 (funcall fn (car v))
+                                   (unless (or done-called canceled)
+                                     (setq done-called t)
+                                     (release-slot)))
+                               (funcall fn (car v)
+                                        (lambda (&rest _args)
+                                          (unless (or done-called canceled)
+                                            (setq done-called t)
+                                            (release-slot))))))
+                         (error
+                          (unless done-called
+                            (setq done-called t)
+                            (release-slot))
+                          (if on-error
+                              (funcall on-error err)
+                            (display-warning
+                             'gen
+                             (format "Error in `gen-run-async' worker: %S" err)
+                             :warning)))))))))
+               (when (and (not exhausted) (not canceled) (not paused) (not finished)
+                          (= active 0))
+                 (schedule-drain))))))
       (setq runner-fn
             (lambda (&optional action)
               (pcase (or action :cancel)
@@ -680,6 +696,70 @@ Returns a cancellation function of zero arguments that aborts execution."
      :on-error on-error
      :on-done (lambda ()
                 (funcall on-done (funcall finalize))))))
+
+;;;###autoload
+(cl-defun gen-mapc-async (fn sequence &key (chunk-size 1) (concurrency 1) (delay 0.0)
+                                      run-after initial-delay idle (name nil) label
+                                      buffer frame reactor on-progress on-cancel
+                                      on-done on-error)
+  "Apply FN asynchronously for side effects across SEQUENCE, calling ON-DONE when complete.
+Unlike `gen-pool-map', results are not accumulated in memory.
+
+FN is called with either (ITEM DONE-CALLBACK) or (ITEM).  When FN is unary,
+it executes synchronously.  When CHUNK-SIZE is greater than 1 and FN is unary,
+CHUNK-SIZE items are processed per dispatch tick before yielding to the timer.
+
+Supported keyword arguments:
+  :chunk-size NUMBER
+    Maximum number of unary operations to execute per dispatch tick (defaults to 1).
+  :concurrency LIMIT
+    Limits concurrent asynchronous operations in flight (defaults to 1).
+  :delay SECONDS
+    Amount of time between item dispatches (defaults to 0.0).
+  :run-after or :initial-delay SECONDS
+    Initial delay before first dispatch (defaults to :delay).
+  :idle BOOLEAN
+    When non-nil, schedules tasks using `run-with-idle-timer' instead of
+    `run-with-timer' for cooperative non-blocking idle execution.
+  :name or :label STRING
+    Identifier for the runner queryable via handle.
+  :buffer BUFFER
+    Optional buffer context: `temp' executes in `with-temp-buffer',
+    a buffer object or string executes in `with-current-buffer'.
+  :frame FRAME
+    Optional frame context for `with-selected-frame'.
+  :on-progress FUNCTION
+    Callback invoked with (PROCESSED TOTAL) when an item completes.
+  :on-done FUNCTION
+    Callback invoked with no arguments once all items finish.
+  :on-error FUNCTION
+    Callback invoked with error descriptor if FN signals synchronously.
+  :reactor REACTOR
+    Object implementing `gen-reactor-dispatch'.  When non-nil, FN is
+    ignored (pass nil) and each item is dispatched through REACTOR.
+  :on-cancel FUNCTION
+    Called with no arguments when the runner is canceled.
+
+Returns a runner handle function `(lambda (&optional action) ...)`."
+  (gen-run-async
+   fn sequence
+   :chunk-size chunk-size
+   :concurrency concurrency
+   :delay delay
+   :run-after run-after
+   :initial-delay initial-delay
+   :idle idle
+   :name (or name label)
+   :buffer buffer
+   :frame frame
+   :reactor reactor
+   :on-progress on-progress
+   :on-cancel on-cancel
+   :on-done on-done
+   :on-error on-error))
+
+;;;###autoload
+(defalias 'gen-each-async #'gen-mapc-async)
 
 (provide 'gen)
 ;;; gen.el ends here

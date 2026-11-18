@@ -718,5 +718,64 @@ If LIMIT-OR-INFINITE is `infinite', yields forever."
     (funcall handle :cancel)
     (should (gen-test--mock-reactor-canceled reactor))))
 
+;;; gen-mapc-async tests
+
+(ert-deftest gen/mapc-async-basic ()
+  "Verify gen-mapc-async processes each item for side effects and calls :on-done."
+  (let ((items '(1 2 3 4 5))
+        (processed nil)
+        (done nil))
+    (gen-mapc-async
+     (lambda (item) (push item processed))
+     items
+     :on-done (lambda () (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal (sort processed #'<) '(1 2 3 4 5)))))
+
+(ert-deftest gen/mapc-async-chunk-size ()
+  "Verify gen-mapc-async processes items in chunks."
+  (let ((items '(1 2 3 4 5 6 7 8 9 10))
+        (processed nil)
+        (done nil))
+    (gen-mapc-async
+     (lambda (item) (push item processed))
+     items
+     :chunk-size 3
+     :delay 0.01
+     :on-done (lambda () (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal (sort processed #'<) '(1 2 3 4 5 6 7 8 9 10)))))
+
+(ert-deftest gen/mapc-async-progress ()
+  "Verify gen-mapc-async reports progress via :on-progress callback."
+  (let ((items '(a b c d))
+        (progress-log nil)
+        (done nil))
+    (gen-mapc-async
+     (lambda (_item) nil)
+     items
+     :on-progress (lambda (p tot) (push (cons p tot) progress-log))
+     :on-done (lambda () (setq done t)))
+    (gen-test-wait-until done)
+    (should (equal (reverse progress-log) '((1 . 4) (2 . 4) (3 . 4) (4 . 4))))))
+
+(ert-deftest gen/mapc-async-cancellation ()
+  "Verify canceling gen-mapc-async runner handle stops execution."
+  (let* ((processed nil)
+         (handle (gen-mapc-async
+                  (lambda (item) (push item processed))
+                  '(1 2 3 4 5 6 7 8 9 10)
+                  :chunk-size 1
+                  :delay 0.05)))
+    (gen-test-wait-until (= (length processed) 1))
+    (funcall handle :cancel)
+    (should (funcall handle :canceled-p))
+    (sit-for 0.1)
+    (should (< (length processed) 10))))
+
+(ert-deftest gen/mapc-async-alias ()
+  "Verify gen-each-async is an alias for gen-mapc-async."
+  (should (eq (indirect-function 'gen-each-async) (indirect-function 'gen-mapc-async))))
+
 (provide 'test-gen)
 ;;; test-gen.el ends here
